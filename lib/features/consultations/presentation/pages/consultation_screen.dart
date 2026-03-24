@@ -490,8 +490,15 @@ class _ConsultationScreenState extends State<ConsultationScreen> {
   Future<void> _startRecording() async {
     try {
       if (await _audioRecorder.hasPermission()) {
-        final path = '/tmp/${DateTime.now().millisecondsSinceEpoch}.m4a';
-        await _audioRecorder.start(const RecordConfig(), path: path);
+        final path = '${Directory.systemTemp.path}/voice_${DateTime.now().millisecondsSinceEpoch}.m4a';
+        await _audioRecorder.start(
+          const RecordConfig(
+            encoder: AudioEncoder.aacLc,
+            sampleRate: 44100,
+            bitRate: 128000,
+          ),
+          path: path,
+        );
         if (mounted) {
           setState(() {
             _isRecording = true;
@@ -512,14 +519,29 @@ class _ConsultationScreenState extends State<ConsultationScreen> {
       if (!mounted) return;
       setState(() => _isRecording = false);
       if (path == null) return;
-      selectedMedia = File(path);
-      mediaType = 'audio';
-      fileName = 'voice_${DateTime.now().millisecondsSinceEpoch}.m4a';
+      final recordingFile = File(path);
+      if (!await recordingFile.exists()) {
+        _showErrorSnackbar('تعذر العثور على ملف التسجيل');
+        return;
+      }
+      setState(() {
+        selectedMedia = recordingFile;
+        mediaType = 'audio';
+        fileName = 'voice_${DateTime.now().millisecondsSinceEpoch}.m4a';
+      });
       await _sendMessage();
     } catch (_) {
       if (mounted) setState(() => _isRecording = false);
       _showErrorSnackbar('تعذر إرسال التسجيل الصوتي');
     }
+  }
+
+  Future<void> _toggleVoiceRecording() async {
+    if (_isRecording) {
+      await _stopAndSendRecording();
+      return;
+    }
+    await _startRecording();
   }
 
   Future<void> _playOrPauseAudio({
@@ -1108,9 +1130,10 @@ class _ConsultationScreenState extends State<ConsultationScreen> {
 
   Widget _buildMessageInput(ThemeData theme, bool isDarkMode) {
     final borderRadius = BorderRadius.circular(30);
+    final canSend = _messageController.text.trim().isNotEmpty || selectedMedia != null;
 
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 14),
       decoration: BoxDecoration(
         color: isDarkMode ? Colors.grey[900] : Colors.white,
         border: Border(
@@ -1221,7 +1244,7 @@ class _ConsultationScreenState extends State<ConsultationScreen> {
 
                       // ========== زر الإرسال الواضح والمحسّن ==========
                       Container(
-                        margin: const EdgeInsets.only(left: 4),
+                        margin: const EdgeInsets.only(left: 4, bottom: 2),
                         child: AnimatedSwitcher(
                           duration: const Duration(milliseconds: 300),
                           transitionBuilder: (child, animation) {
@@ -1242,40 +1265,31 @@ class _ConsultationScreenState extends State<ConsultationScreen> {
                             ),
                           )
                               : Material(
-                            color: Colors.transparent,
+                            color: canSend ? theme.primaryColor : theme.disabledColor.withOpacity(0.5),
+                            borderRadius: BorderRadius.circular(20),
                             child: InkWell(
                               key: const ValueKey("send_button"),
-                              onTap: (_messageController.text.isEmpty && selectedMedia == null)
-                                  ? null
-                                  : _sendMessage,
+                              onTap: canSend ? _sendMessage : null,
                               borderRadius: BorderRadius.circular(20),
                               child: Padding(
-                                padding: const EdgeInsets.all(8.0),
+                                padding: const EdgeInsets.all(9),
                                 child: Icon(
-                                  (_messageController.text.isEmpty && selectedMedia == null)
-                                      ? Icons.mic_rounded
-                                      : Icons.send_rounded,
-                                  color: (_messageController.text.isEmpty && selectedMedia == null)
-                                      ? theme.disabledColor
-                                      : theme.primaryColor,
-                                  size: 20,
-                                  weight: 24,
+                                  Icons.send_rounded,
+                                  color: theme.colorScheme.onPrimary,
+                                  size: 22,
                                 ),
                               ),
                             ),
                           ),
                         ),
                       ),
-                      if (_messageController.text.isEmpty && selectedMedia == null)
-                        GestureDetector(
-                          onLongPressStart: (_) => _startRecording(),
-                          onLongPressEnd: (_) => _stopAndSendRecording(),
-                          child: Container(
-                            margin: const EdgeInsetsDirectional.only(start: 4),
-                            child: Icon(
-                              _isRecording ? Icons.mic : Icons.mic_none_rounded,
-                              color: _isRecording ? Colors.red : theme.primaryColor,
-                            ),
+                      if (!canSend)
+                        IconButton(
+                          onPressed: _toggleVoiceRecording,
+                          tooltip: _isRecording ? 'إيقاف وإرسال التسجيل' : 'تسجيل صوتي',
+                          icon: Icon(
+                            _isRecording ? Icons.stop_circle_rounded : Icons.mic_rounded,
+                            color: _isRecording ? theme.colorScheme.error : theme.primaryColor,
                           ),
                         ),
                     ],
@@ -1543,12 +1557,53 @@ class _ConsultationScreenState extends State<ConsultationScreen> {
           )
               : const SizedBox.shrink();
 
-          return GestureDetector(
-            onDoubleTap: () => MessageReactionsService.toggleReaction(
+          Future<void> onDoubleTapReaction() async {
+            final selected = await showModalBottomSheet<String>(
+              context: context,
+              backgroundColor: Theme.of(context).colorScheme.surface,
+              shape: const RoundedRectangleBorder(
+                borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+              ),
+              builder: (context) {
+                const emojis = ['❤️', '👍', '🙏', '😢', '😮', '😂'];
+                return SafeArea(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 16),
+                    child: Wrap(
+                      spacing: 12,
+                      children: emojis.map((emoji) {
+                        return InkWell(
+                          onTap: () => Navigator.pop(context, emoji),
+                          borderRadius: BorderRadius.circular(28),
+                          child: Container(
+                            width: 48,
+                            height: 48,
+                            alignment: Alignment.center,
+                            decoration: BoxDecoration(
+                              color: theme.colorScheme.primaryContainer.withOpacity(0.45),
+                              shape: BoxShape.circle,
+                            ),
+                            child: Text(emoji, style: const TextStyle(fontSize: 24)),
+                          ),
+                        );
+                      }).toList(),
+                    ),
+                  ),
+                );
+              },
+            );
+
+            if (selected == null) return;
+            await MessageReactionsService.toggleReaction(
               consultationId: widget.consultationId,
               messageId: msgId,
-              emoji: '❤️',
-            ),
+              emoji: selected,
+            );
+            if (mounted) setState(() {});
+          }
+
+          return GestureDetector(
+            onDoubleTap: onDoubleTapReaction,
             onLongPress: () => _handleLongPress(doc),
             onHorizontalDragEnd: (details) {
               if (details.primaryVelocity != null && details.primaryVelocity! > 0) {
@@ -1644,15 +1699,10 @@ class _ConsultationScreenState extends State<ConsultationScreen> {
                               ],
                             ),
                           ),
-                          // ========== التفاعلات على الرسالة ==========
-                          const SizedBox(height: 6),
-                          Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 8),
-                            child: MessageReactionsWidget(
-                              consultationId: widget.consultationId,
-                              messageId: msgId,
-                              showAddButton: false,
-                            ),
+                          MessageReactionsWidget(
+                            consultationId: widget.consultationId,
+                            messageId: msgId,
+                            showAddButton: false,
                           ),
                         ],
                       ),
