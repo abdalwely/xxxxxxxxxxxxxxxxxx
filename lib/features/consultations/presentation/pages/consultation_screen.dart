@@ -10,6 +10,7 @@ import 'package:visibility_detector/visibility_detector.dart';
 import 'package:zego_uikit_prebuilt_call/zego_uikit_prebuilt_call.dart';
 import 'package:record/record.dart';
 import 'package:audioplayers/audioplayers.dart';
+import 'dart:convert';
 import 'dart:io';
 import '../../../../core/config/medical_theme.dart';
 import '../widgets/message_reactions_widget.dart';
@@ -82,6 +83,7 @@ class _ConsultationScreenState extends State<ConsultationScreen> {
   String? _playingMessageId;
   Duration _audioDuration = Duration.zero;
   Duration _audioPosition = Duration.zero;
+  final Map<String, String> _inlineAudioFiles = {};
 
   @override
   void initState() {
@@ -437,12 +439,26 @@ class _ConsultationScreenState extends State<ConsultationScreen> {
     }
 
     String? downloadUrl;
+    String? inlineAudioBase64;
     String type = 'text';
 
     try {
       if (selectedMedia != null && mediaType != null) {
-        downloadUrl = await _uploadFile();
         type = mediaType!;
+        if (type == 'audio') {
+          try {
+            downloadUrl = await _uploadFile();
+          } catch (e) {
+            if (_isStoragePlanRestricted(e)) {
+              inlineAudioBase64 = await _encodeInlineAudio(selectedMedia!);
+              type = 'audio_inline';
+            } else {
+              rethrow;
+            }
+          }
+        } else {
+          downloadUrl = await _uploadFile();
+        }
       }
 
       await _firestore
@@ -455,6 +471,7 @@ class _ConsultationScreenState extends State<ConsultationScreen> {
         'senderImage': getUserImageUrl(widget.isDoctor ? doctorData : patientData),
         'text': _messageController.text.trim(),
         'fileUrl': downloadUrl,
+        'audioBase64': inlineAudioBase64,
         'fileName': fileName,
         'type': type,
         'timestamp': FieldValue.serverTimestamp(),
@@ -494,8 +511,7 @@ class _ConsultationScreenState extends State<ConsultationScreen> {
         await _audioRecorder.start(
           const RecordConfig(
             encoder: AudioEncoder.aacLc,
-            sampleRate: 44100,
-            bitRate: 128000,
+
           ),
           path: path,
         );
@@ -546,7 +562,8 @@ class _ConsultationScreenState extends State<ConsultationScreen> {
 
   Future<void> _playOrPauseAudio({
     required String messageId,
-    required String audioUrl,
+    String? audioUrl,
+    String? inlineAudioBase64,
   }) async {
     try {
       if (_playingMessageId == messageId) {
@@ -554,12 +571,52 @@ class _ConsultationScreenState extends State<ConsultationScreen> {
         setState(() => _playingMessageId = null);
         return;
       }
+      if (audioUrl == null && inlineAudioBase64 == null) {
+        _showErrorSnackbar('لا يوجد ملف صوتي للتشغيل');
+        return;
+      }
       await _audioPlayer.stop();
-      await _audioPlayer.play(UrlSource(audioUrl));
+      if (audioUrl != null && audioUrl.isNotEmpty) {
+        await _audioPlayer.play(UrlSource(audioUrl));
+      } else {
+        final path = await _createInlineAudioFile(
+          messageId: messageId,
+          base64Data: inlineAudioBase64!,
+        );
+        await _audioPlayer.play(DeviceFileSource(path));
+      }
       setState(() => _playingMessageId = messageId);
     } catch (_) {
       _showErrorSnackbar('تعذر تشغيل الرسالة الصوتية');
     }
+  }
+
+  bool _isStoragePlanRestricted(Object e) {
+    final message = e.toString().toLowerCase();
+    return message.contains('code\": 402') ||
+        message.contains('spark pricing plan') ||
+        message.contains('no longer supports');
+  }
+
+  Future<String> _encodeInlineAudio(File audioFile) async {
+    final bytes = await audioFile.readAsBytes();
+    return base64Encode(bytes);
+  }
+
+  Future<String> _createInlineAudioFile({
+    required String messageId,
+    required String base64Data,
+  }) async {
+    if (_inlineAudioFiles.containsKey(messageId)) {
+      return _inlineAudioFiles[messageId]!;
+    }
+
+    final bytes = base64Decode(base64Data);
+    final path = '${Directory.systemTemp.path}/inline_voice_$messageId.m4a';
+    final file = File(path);
+    await file.writeAsBytes(bytes, flush: true);
+    _inlineAudioFiles[messageId] = path;
+    return path;
   }
   Future<String?> _uploadFile() async {
     setState(() {
@@ -577,6 +634,13 @@ class _ConsultationScreenState extends State<ConsultationScreen> {
         if (mounted) {
           setState(() {
             _uploadProgress = snapshot.bytesTransferred / snapshot.totalBytes;
+          });
+        }
+      }, onError: (_) {
+        if (mounted) {
+          setState(() {
+            _isUploading = false;
+            _uploadProgress = 0.0;
           });
         }
       });
@@ -1327,7 +1391,10 @@ class _ConsultationScreenState extends State<ConsultationScreen> {
     }
 
     Widget content;
-    if ((type == 'image' || type == 'video' || type == 'file' || type == 'audio') && fileUrl != null) {
+    final inlineAudioBase64 = msg['audioBase64'] as String?;
+
+    if ((type == 'image' || type == 'video' || type == 'file' || type == 'audio' || type == 'audio_inline') &&
+        (fileUrl != null || inlineAudioBase64 != null)) {
       List<Widget> contentWidgets = [];
 
       if (text.isNotEmpty) {
@@ -1435,7 +1502,7 @@ class _ConsultationScreenState extends State<ConsultationScreen> {
             ),
           ),
         );
-      } else if (type == 'audio') {
+      } else if (type == 'audio' || type == 'audio_inline') {
         contentWidgets.add(
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
@@ -1453,6 +1520,7 @@ class _ConsultationScreenState extends State<ConsultationScreen> {
                       onPressed: () => _playOrPauseAudio(
                         messageId: msgId,
                         audioUrl: fileUrl,
+                        inlineAudioBase64: inlineAudioBase64,
                       ),
                       icon: Icon(
                         _playingMessageId == msgId
