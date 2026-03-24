@@ -511,8 +511,7 @@ class _ConsultationScreenState extends State<ConsultationScreen> {
         await _audioRecorder.start(
           const RecordConfig(
             encoder: AudioEncoder.aacLc,
-            sampleRate: 22050,
-            bitRate: 64000,
+
           ),
           path: path,
         );
